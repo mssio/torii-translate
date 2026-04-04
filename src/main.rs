@@ -113,7 +113,7 @@ fn save_config(api_key: &str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -122,6 +122,8 @@ fn save_config(api_key: &str) -> Result<()> {
             .open(&path)
             .context("failed to open config file")?;
         file.write_all(content.as_bytes()).context("failed to write config")?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .context("failed to set config file permissions")?;
     }
     #[cfg(not(unix))]
     fs::write(&path, content).context("failed to write config")?;
@@ -241,6 +243,12 @@ fn generate_batch_filenames(start: &str, end: &str) -> Result<Vec<String>> {
             ext, end_ext
         );
     }
+    if start_stem.len() != end_stem.len() {
+        bail!(
+            "start and end filenames have incompatible zero-padding ('{}' vs '{}')",
+            start_stem, end_stem
+        );
+    }
     let width = start_stem.len();
     let start_n: u64 = start_stem
         .parse()
@@ -279,9 +287,13 @@ async fn translate_file(
         .await
         .with_context(|| format!("failed to read file '{}'", filename))?;
 
+    let basename = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .with_context(|| format!("invalid filename: '{}'", filename))?;
     let mime = mime_for_ext(filename);
     let file_part = reqwest::multipart::Part::bytes(bytes)
-        .file_name(filename.to_string())
+        .file_name(basename.to_string())
         .mime_str(mime)
         .context("invalid MIME type")?;
 
@@ -320,10 +332,6 @@ async fn translate_file(
         .decode(b64_data)
         .context("failed to decode base64 image")?;
 
-    let basename = std::path::Path::new(filename)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .with_context(|| format!("invalid filename: '{}'", filename))?;
     let out_path = format!("./translated-result/{}", basename);
     tokio::fs::write(&out_path, &image_bytes)
         .await
@@ -396,6 +404,8 @@ async fn run() -> Result<()> {
             style(ok_count).bold().green(),
             if ok_count == 1 { "" } else { "s" }
         );
+        println!();
+        Ok(())
     } else {
         println!(
             "  {} {}/{} succeeded  {} failed",
@@ -404,10 +414,9 @@ async fn run() -> Result<()> {
             filenames.len(),
             style(fail_count).bold().red()
         );
+        println!();
+        Err(anyhow::anyhow!("{} file(s) failed to translate", fail_count))
     }
-    println!();
-
-    Ok(())
 }
 
 #[tokio::main]
