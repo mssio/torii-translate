@@ -2,9 +2,11 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use console::style;
 use dialoguer::{Input, Password, Select, theme::ColorfulTheme};
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 // --- types ---
 
@@ -66,21 +68,40 @@ fn info(msg: &str) {
     println!("  {} {}", style("›").dim(), style(msg).dim());
 }
 
-fn progress(msg: &str) {
-    println!("  {} {}", style("◆").bold().yellow(), style(msg).bold());
-}
-
-fn saved(filename: &str) {
+fn saved(filename: &str, elapsed: f64) {
     println!(
-        "  {} {} {}",
+        "  {} {} {}  {}",
         style("✓").bold().green(),
         style("Saved →").green(),
-        style(format!("translated-result/{}", filename)).bold().green()
+        style(format!("translated-result/{}", filename)).bold().green(),
+        style(format!("({:.1}s)", elapsed)).dim(),
     );
 }
 
 fn err(msg: &str) {
     println!("  {} {}", style("✗").bold().red(), style(msg).red());
+}
+
+fn err_timed(msg: &str, elapsed: f64) {
+    println!(
+        "  {} {}  {}",
+        style("✗").bold().red(),
+        style(msg).red(),
+        style(format!("({:.1}s)", elapsed)).dim(),
+    );
+}
+
+fn make_spinner(filename: &str) -> ProgressBar {
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+            .template("  {spinner:.yellow}  {msg}  {elapsed_precise}")
+            .unwrap(),
+    );
+    pb.set_message(style(filename).bold().to_string());
+    pb.enable_steady_tick(Duration::from_millis(80));
+    pb
 }
 
 // --- config ---
@@ -283,7 +304,7 @@ async fn translate_file(
     api_key: &str,
     translator: &str,
     filename: &str,
-) -> Result<()> {
+) -> Result<String> {
     let bytes = tokio::fs::read(filename)
         .await
         .with_context(|| format!("failed to read file '{}'", filename))?;
@@ -361,7 +382,7 @@ async fn translate_file(
         .await
         .with_context(|| format!("failed to write output file '{}'", out_path))?;
 
-    Ok(())
+    Ok(out_filename)
 }
 
 // --- main ---
@@ -406,14 +427,17 @@ async fn run() -> Result<()> {
     let mut fail_count = 0usize;
 
     for filename in &filenames {
-        progress(&format!("{}", style(filename).bold()));
+        let start = std::time::Instant::now();
+        let pb = make_spinner(filename);
         match translate_file(&client, &api_key, translator, filename).await {
-            Ok(()) => {
-                saved(filename);
+            Ok(out_name) => {
+                pb.finish_and_clear();
+                saved(&out_name, start.elapsed().as_secs_f64());
                 ok_count += 1;
             }
             Err(e) => {
-                err(&format!("{}: {}", filename, e));
+                pb.finish_and_clear();
+                err_timed(&format!("{}: {}", filename, e), start.elapsed().as_secs_f64());
                 fail_count += 1;
             }
         }
