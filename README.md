@@ -121,6 +121,49 @@ chapter-01/
     └── 002.png
 ```
 
+## Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant CLI as Torii CLI
+    participant FileSystem as File System
+    participant API as Torii API
+
+    User->>CLI: Run torii-translate
+    CLI->>FileSystem: Check ~/.mss-torii-translate/config
+    alt Config exists
+        FileSystem-->>CLI: Load API key
+    else Config missing
+        CLI->>User: Prompt for API key (masked)
+        User-->>CLI: Enter API key
+        CLI->>FileSystem: Save config
+    end
+
+    CLI->>User: Show translator model menu
+    User-->>CLI: Select model
+
+    CLI->>User: Single image or batch?
+    User-->>CLI: Choose option
+
+    alt Single image mode
+        User-->>CLI: Provide filename
+    else Batch mode
+        User-->>CLI: Provide filename range
+    end
+
+    CLI->>FileSystem: Read image file(s)
+    loop For each image
+        FileSystem-->>CLI: Image content
+        CLI->>API: Upload (multipart form + bearer auth)
+        API-->>CLI: JSON response (image, inpainted)
+        CLI->>CLI: Decode base64
+        CLI->>FileSystem: Write to ./translated-result/
+    end
+
+    CLI->>User: Display success/failure summary
+```
+
 ## Supported Image Formats
 
 `png`, `jpg`/`jpeg`, `webp`, `gif`
