@@ -267,13 +267,14 @@ fn generate_batch_filenames(start: &str, end: &str) -> Result<Vec<String>> {
 
 // --- api ---
 
-fn mime_for_ext(filename: &str) -> &'static str {
+fn mime_for_ext(filename: &str) -> Option<&'static str> {
     let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
     match ext.as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        _ => "image/png",
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        _ => None,
     }
 }
 
@@ -291,7 +292,13 @@ async fn translate_file(
         .file_name()
         .and_then(|n| n.to_str())
         .with_context(|| format!("invalid filename: '{}'", filename))?;
-    let mime = mime_for_ext(filename);
+    let mime = mime_for_ext(filename).with_context(|| {
+        let ext = std::path::Path::new(filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("(none)");
+        format!("unsupported file extension: '{}'", ext)
+    })?;
     let file_part = reqwest::multipart::Part::bytes(bytes)
         .file_name(basename.to_string())
         .mime_str(mime)
@@ -322,17 +329,34 @@ async fn translate_file(
 
     let api_response: ApiResponse = response.json().await.context("failed to parse API response")?;
 
-    let b64_data = api_response
-        .image
-        .split_once(',')
-        .map(|(_, data)| data)
-        .unwrap_or(&api_response.image);
+    let (response_mime, b64_data): (&str, &str) = match api_response.image.split_once(',') {
+        Some((header, data)) => {
+            let mime = header
+                .strip_prefix("data:")
+                .and_then(|s| s.split(';').next())
+                .unwrap_or("image/png");
+            (mime, data)
+        }
+        None => ("image/png", &api_response.image),
+    };
+
+    let response_ext = match response_mime {
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "png",
+    };
 
     let image_bytes = base64::engine::general_purpose::STANDARD
         .decode(b64_data)
         .context("failed to decode base64 image")?;
 
-    let out_path = format!("./translated-result/{}", basename);
+    let stem = std::path::Path::new(basename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(basename);
+    let out_filename = format!("{}.{}", stem, response_ext);
+    let out_path = format!("./translated-result/{}", out_filename);
     tokio::fs::write(&out_path, &image_bytes)
         .await
         .with_context(|| format!("failed to write output file '{}'", out_path))?;
