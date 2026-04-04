@@ -6,6 +6,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 // --- types ---
@@ -423,8 +425,18 @@ async fn run() -> Result<()> {
     );
     println!();
 
+    // Graceful Ctrl+C — finishes the current image then stops the batch
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = Arc::clone(&stop);
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            stop_clone.store(true, Ordering::SeqCst);
+        }
+    });
+
     let mut ok_count = 0usize;
     let mut fail_count = 0usize;
+    let mut stopped_early = false;
 
     for filename in &filenames {
         let start = std::time::Instant::now();
@@ -441,11 +453,28 @@ async fn run() -> Result<()> {
                 fail_count += 1;
             }
         }
+
+        if stop.load(Ordering::SeqCst) {
+            println!();
+            info("Ctrl+C received — stopping after current image.");
+            stopped_early = true;
+            break;
+        }
     }
 
     println!();
     println!("  {}", style("─".repeat(42)).dim());
-    if fail_count == 0 {
+    if stopped_early {
+        println!(
+            "  {} {}/{} completed before stop  {} failed",
+            style("◆").bold().yellow(),
+            style(ok_count + fail_count).bold().yellow(),
+            filenames.len(),
+            style(fail_count).bold().red()
+        );
+        println!();
+        Err(anyhow::anyhow!("batch stopped early by user"))
+    } else if fail_count == 0 {
         println!(
             "  {} {} file{} translated successfully",
             style("✓").bold().green(),
