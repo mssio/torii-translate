@@ -48,7 +48,7 @@ The app will guide you through four steps:
 
 On first run you will be prompted for your Torii Translate API key. The key is saved to `~/.mss-torii-translate/config` and will not be asked again on subsequent runs.
 
-```
+```text
   API Key
   › No API key found. Enter your Torii Translate key to continue.
 
@@ -62,7 +62,7 @@ To change the key, edit or delete `~/.mss-torii-translate/config`.
 
 Use the arrow keys to select a translation model, then press Enter.
 
-```
+```text
   Translator
   Model
   > Gemini 2.5 Flash Lite  (1 credit)
@@ -84,7 +84,7 @@ Use the arrow keys to select a translation model, then press Enter.
 
 ### Step 3 — Single or Batch
 
-```
+```text
   Input
   Mode
   > ❯  Single image
@@ -95,13 +95,13 @@ Use the arrow keys to select a translation model, then press Enter.
 
 **Single image** — type the filename. The current directory name is shown in the prompt so you can confirm you are in the right place.
 
-```
+```text
   Filename in [chapter-01]: 005.png
 ```
 
 **Batch** — type the start and end filenames. The app derives the full list by incrementing the zero-padded numeric stem.
 
-```
+```text
   Start filename in [chapter-01]: 001.png
   End filename: 005.png
 ```
@@ -112,7 +112,7 @@ This calls the API for `001.png`, `002.png`, `003.png`, `004.png`, and `005.png`
 
 Translated images are written to `./translated-result/` inside the directory you ran the command from, keeping the original filenames.
 
-```
+```text
 chapter-01/
 ├── 001.png
 ├── 002.png

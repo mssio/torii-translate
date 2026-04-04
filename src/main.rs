@@ -109,7 +109,22 @@ fn save_config(api_key: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).context("failed to create config directory")?;
     }
-    fs::write(&path, format!("api_key={}\n", api_key)).context("failed to write config")?;
+    let content = format!("api_key={}\n", api_key);
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .context("failed to open config file")?;
+        file.write_all(content.as_bytes()).context("failed to write config")?;
+    }
+    #[cfg(not(unix))]
+    fs::write(&path, content).context("failed to write config")?;
     Ok(())
 }
 
@@ -219,7 +234,13 @@ fn split_stem_ext(filename: &str) -> Result<(&str, &str)> {
 
 fn generate_batch_filenames(start: &str, end: &str) -> Result<Vec<String>> {
     let (start_stem, ext) = split_stem_ext(start)?;
-    let (end_stem, _) = split_stem_ext(end)?;
+    let (end_stem, end_ext) = split_stem_ext(end)?;
+    if ext != end_ext {
+        bail!(
+            "start and end filenames have different extensions ('{}' vs '{}')",
+            ext, end_ext
+        );
+    }
     let width = start_stem.len();
     let start_n: u64 = start_stem
         .parse()
@@ -248,7 +269,12 @@ fn mime_for_ext(filename: &str) -> &'static str {
     }
 }
 
-async fn translate_file(api_key: &str, translator: &str, filename: &str) -> Result<()> {
+async fn translate_file(
+    client: &reqwest::Client,
+    api_key: &str,
+    translator: &str,
+    filename: &str,
+) -> Result<()> {
     let bytes = tokio::fs::read(filename)
         .await
         .with_context(|| format!("failed to read file '{}'", filename))?;
@@ -268,7 +294,6 @@ async fn translate_file(api_key: &str, translator: &str, filename: &str) -> Resu
         .text("min_font_size", "12")
         .part("file", file_part);
 
-    let client = reqwest::Client::new();
     let response = client
         .post("https://api.toriitranslate.com/api/v2/upload")
         .header("Authorization", format!("Bearer {}", api_key))
@@ -295,7 +320,11 @@ async fn translate_file(api_key: &str, translator: &str, filename: &str) -> Resu
         .decode(b64_data)
         .context("failed to decode base64 image")?;
 
-    let out_path = format!("./translated-result/{}", filename);
+    let basename = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .with_context(|| format!("invalid filename: '{}'", filename))?;
+    let out_path = format!("./translated-result/{}", basename);
     tokio::fs::write(&out_path, &image_bytes)
         .await
         .with_context(|| format!("failed to write output file '{}'", out_path))?;
@@ -305,8 +334,7 @@ async fn translate_file(api_key: &str, translator: &str, filename: &str) -> Resu
 
 // --- main ---
 
-#[tokio::main]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
     print_banner();
 
     let api_key = ensure_api_key()?;
@@ -320,15 +348,14 @@ async fn main() -> Result<()> {
         }
         Mode::Batch => {
             let (start, end) = prompt_batch_range()?;
-            match generate_batch_filenames(&start, &end) {
-                Ok(files) => files,
-                Err(e) => {
-                    err(&format!("{}", e));
-                    std::process::exit(1);
-                }
-            }
+            generate_batch_filenames(&start, &end)?
         }
     };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .context("failed to build HTTP client")?;
 
     tokio::fs::create_dir_all("./translated-result")
         .await
@@ -348,7 +375,7 @@ async fn main() -> Result<()> {
 
     for filename in &filenames {
         progress(&format!("{}", style(filename).bold()));
-        match translate_file(&api_key, translator, filename).await {
+        match translate_file(&client, &api_key, translator, filename).await {
             Ok(()) => {
                 saved(filename);
                 ok_count += 1;
@@ -381,4 +408,12 @@ async fn main() -> Result<()> {
     println!();
 
     Ok(())
+}
+
+#[tokio::main]
+async fn main() {
+    if let Err(e) = run().await {
+        err(&format!("{:#}", e));
+        std::process::exit(1);
+    }
 }

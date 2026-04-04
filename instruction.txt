@@ -35,8 +35,8 @@ This is the API Response:
             "lineWidth": 10,
             "fillColor": "#0e0c0f",
             "font": "36px WildWords",
-            "addFontBackground": False,
-            "addFontBorder": False,
+            "addFontBackground": false,
+            "addFontBorder": false,
             "addBackgroundColor": "#ffffff"
         }
     ]

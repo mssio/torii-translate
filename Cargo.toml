@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-clap = "4.6.0"
 reqwest = { version = "0.12", features = ["multipart", "json"] }
 tokio = { version = "1", features = ["full"] }
 dialoguer = "0.11"
