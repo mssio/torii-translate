@@ -7,17 +7,32 @@ A Rust CLI tool that sends manga/comic images to the [Torii Translate](https://t
 - [Rust](https://www.rust-lang.org/tools/install) 1.75 or later
 - A Torii Translate API key
 
-## Build
+## Install
+
+### 1. Install Rust
+
+If you don't have Rust installed, get it via `rustup` (the official installer):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Follow the on-screen prompts, then restart your terminal (or run `source ~/.cargo/env`) so that `cargo` is on your `PATH`.
+
+Verify the installation:
+
+```bash
+cargo --version
+```
+
+### 2. Clone the repository
 
 ```bash
 git clone <repo>
 cd torii-translate
-cargo build --release
 ```
 
-The compiled binary will be at `target/release/torii-translate`.
-
-## Install
+### 3. Build and install the binary
 
 **Option A — install to `~/.cargo/bin` (recommended):**
 
@@ -25,13 +40,21 @@ The compiled binary will be at `target/release/torii-translate`.
 cargo install --path .
 ```
 
-This puts `torii-translate` on your `PATH` so you can run it from anywhere.
+This compiles the binary in release mode and places it in `~/.cargo/bin/`, which `rustup` adds to your `PATH` automatically. You can then run `torii-translate` from any directory.
 
 **Option B — copy the binary manually:**
 
 ```bash
 cargo build --release
 cp target/release/torii-translate /usr/local/bin/
+```
+
+Use this if you prefer to control where the binary lives (e.g. on a system-wide path like `/usr/local/bin/`).
+
+### 4. Verify
+
+```bash
+torii-translate --help
 ```
 
 ## Usage
