@@ -1,0 +1,61 @@
+I want to create app that can consume this api:
+
+This is the API Request:
+
+```
+curl -X POST https://api.toriitranslate.com/api/v2/upload \
+-H "Authorization: Bearer YOUR_API_KEY" \
+-F "target_lang=en" \
+-F "translator=gemini-2.5-flash" \
+-F "font=wildwords" \
+-F "text_align=auto" \
+-F "stroke_disabled=false" \
+-F "min_font_size=12" \
+-F "file=@path/to/image.png" \
+--output response.json --fail --silent --show-error
+```
+
+This is the API Response:
+
+```
+{
+    "image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=...",
+    "inpainted": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=...",
+    "context": "...",
+    "text": [
+        {
+            "x": 623.0,
+            "y": 326.5,
+            "width": 50.0,
+            "height": 141.0,
+            "text": "Tanjiro",
+            "originalText": "炭治郎",
+            "textAlign": "center",
+            "strokeColor": "#f9f7f9",
+            "lineWidth": 10,
+            "fillColor": "#0e0c0f",
+            "font": "36px WildWords",
+            "addFontBackground": False,
+            "addFontBorder": False,
+            "addBackgroundColor": "#ffffff"
+        }
+    ]
+}
+```
+
+I want this app to be interactive and asking few questions first before executing. This app should read files on current directory where user run the script from.
+
+1. App should ask for api key, then save it to ~/.mss-torii-translate/config. If api key exists in config file, do not ask again.
+2. App should ask which translator to use (model), the choice will be:
+    - name = Gemini 2.5 Flash Lite (1 credit), value = gemini-2.5-flash
+    - name = Deepseek (1 credit), value = deepseek
+    - name = Grok 4.1 Fast (1 credit), value = grok-4-fast
+    - name = Kimi K2.5 (2 credits), value = kimi-k2
+    - name = GPT 5.1 (2+ credits), value = gpt-5
+    - name = Gemini 3 Flash (2+ credits), value = gemini-3-flash
+3. App should ask whether user want multiple images or single image translate.
+4. If user select single image, ask the file image name in current directory (display the current directory name in the question so user can know they are in correct directory).
+5. If user select multiple image, ask the start image name end end image name. (the input should be like this: start = 001.png, end = 003.png --> the api should be called 3 times for 001.png, 002.png, 003.png).
+6. The api should save the translated result in new directory named translated-result with same image name.
+
+Please generate claude.md first before creating this project.
