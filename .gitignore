@@ -1,1 +1,28 @@
+# Rust build output
 /target
+
+# Claude Code
+.claude/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Editor and IDE
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+
+# Config with secrets (runtime, not committed)
+~/.mss-torii-translate/
+
+# Translated output (local results, not source)
+translated-result/

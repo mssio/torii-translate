@@ -1,3 +1,560 @@
-fn main() {
-    println!("Hello, world!");
+use anyhow::{Context, Result, bail};
+use base64::Engine;
+use console::style;
+use dialoguer::{Input, Password, Select, theme::ColorfulTheme};
+use indicatif::{ProgressBar, ProgressStyle};
+use serde::Deserialize;
+use std::fs;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+// --- types ---
+
+struct Config {
+    api_key: String,
+    last_translator: String,  // persisted value of the translator field, e.g. "gemini-2.5-flash"
+    last_mode: String,        // "single" or "batch"
+}
+
+#[derive(Deserialize)]
+struct ApiResponse {
+    image: String,
+}
+
+struct TranslatorOption {
+    label: &'static str,
+    value: &'static str,
+}
+
+enum Mode {
+    Single,
+    Batch,
+}
+
+const TRANSLATORS: &[TranslatorOption] = &[
+    TranslatorOption { label: "Gemini 2.5 Flash Lite  (1 credit)", value: "gemini-2.5-flash" },
+    TranslatorOption { label: "Deepseek               (1 credit)", value: "deepseek" },
+    TranslatorOption { label: "Grok 4.1 Fast          (1 credit)", value: "grok-4-fast" },
+    TranslatorOption { label: "Kimi K2.5              (2 credits)", value: "kimi-k2" },
+    TranslatorOption { label: "GPT 5.1                (2+ credits)", value: "gpt-5" },
+    TranslatorOption { label: "Gemini 3 Flash         (2+ credits)", value: "gemini-3-flash" },
+];
+
+// --- banner ---
+
+fn print_banner() {
+    println!();
+    println!(
+        "  {}  {}",
+        style("⛩").bold(),
+        style("Torii Translate").bold().magenta()
+    );
+    println!(
+        "  {}",
+        style("Manga image translation powered by AI").dim()
+    );
+    println!("  {}", style("─".repeat(42)).dim());
+    println!();
+}
+
+fn section(label: &str) {
+    println!();
+    println!("  {}", style(label).bold().cyan());
+}
+
+fn success(msg: &str) {
+    println!("  {} {}", style("✓").bold().green(), style(msg).green());
+}
+
+fn info(msg: &str) {
+    println!("  {} {}", style("›").dim(), style(msg).dim());
+}
+
+fn err(msg: &str) {
+    println!("  {} {}", style("✗").bold().red(), style(msg).red());
+}
+
+fn make_spinner(filename: &str) -> ProgressBar {
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+            .template("  {spinner:.yellow}  {msg}  {elapsed_precise}")
+            .unwrap(),
+    );
+    pb.set_message(style(filename).bold().to_string());
+    pb.enable_steady_tick(Duration::from_millis(80));
+    pb
+}
+
+// --- config ---
+
+fn config_path() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    Ok(home.join(".torii-translate").join("config"))
+}
+
+fn load_config() -> Option<Config> {
+    let path = config_path().ok()?;
+    let content = fs::read_to_string(path).ok()?;
+    let mut api_key = String::new();
+    let mut last_translator = String::new();
+    let mut last_mode = String::new();
+    for line in content.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            match k.trim() {
+                "api_key"         => api_key         = v.trim().to_string(),
+                "last_translator" => last_translator = v.trim().to_string(),
+                "last_mode"       => last_mode       = v.trim().to_string(),
+                _ => {}
+            }
+        }
+    }
+    if api_key.is_empty() { return None; }
+    Some(Config { api_key, last_translator, last_mode })
+}
+
+fn save_config(cfg: &Config) -> Result<()> {
+    let path = config_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).context("failed to create config directory")?;
+    }
+    let content = format!(
+        "api_key={}\nlast_translator={}\nlast_mode={}\n",
+        cfg.api_key, cfg.last_translator, cfg.last_mode,
+    );
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .context("failed to open config file")?;
+        file.write_all(content.as_bytes()).context("failed to write config")?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .context("failed to set config file permissions")?;
+    }
+    #[cfg(not(unix))]
+    fs::write(&path, content).context("failed to write config")?;
+    Ok(())
+}
+
+fn ensure_api_key() -> Result<Config> {
+    if let Some(cfg) = load_config() {
+        info("API key loaded from ~/.torii-translate/config");
+        return Ok(cfg);
+    }
+
+    section("API Key");
+    info("No API key found. Enter your Torii Translate key to continue.");
+    println!();
+
+    let theme = ColorfulTheme::default();
+    let key: String = Password::with_theme(&theme)
+        .with_prompt(format!("{}", style("API key").bold()))
+        .interact()
+        .context("failed to read API key")?;
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        bail!("API key cannot be empty");
+    }
+    let cfg = Config { api_key: key, last_translator: String::new(), last_mode: String::new() };
+    save_config(&cfg)?;
+    success("API key saved to ~/.torii-translate/config");
+    Ok(cfg)
+}
+
+// --- prompts ---
+
+fn prompt_translator(default: usize) -> Result<&'static str> {
+    section("Translator");
+    let labels: Vec<&str> = TRANSLATORS.iter().map(|t| t.label).collect();
+    let theme = ColorfulTheme::default();
+    let idx = Select::with_theme(&theme)
+        .with_prompt(format!("{}", style("Model").bold()))
+        .items(&labels)
+        .default(default)
+        .interact()
+        .context("failed to read translator selection")?;
+    Ok(TRANSLATORS[idx].value)
+}
+
+fn prompt_mode(default: usize) -> Result<Mode> {
+    section("Input");
+    let items = [
+        format!("{}  Single image", style("❯").magenta()),
+        format!("{}  Batch  (range of images)", style("❯").magenta()),
+    ];
+    let theme = ColorfulTheme::default();
+    let idx = Select::with_theme(&theme)
+        .with_prompt(format!("{}", style("Mode").bold()))
+        .items(&items)
+        .default(default)
+        .interact()
+        .context("failed to read mode selection")?;
+    Ok(if idx == 0 { Mode::Single } else { Mode::Batch })
+}
+
+fn prompt_single_file() -> Result<String> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let dir_name = cwd
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("current directory");
+    let theme = ColorfulTheme::default();
+    let filename: String = Input::with_theme(&theme)
+        .with_prompt(format!(
+            "{} {}",
+            style("Filename in").bold(),
+            style(format!("[{}]", dir_name)).bold().cyan()
+        ))
+        .interact_text()
+        .context("failed to read filename")?;
+    Ok(filename.trim().to_string())
+}
+
+fn prompt_batch_range() -> Result<(String, String)> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let dir_name = cwd
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("current directory");
+    let theme = ColorfulTheme::default();
+    let start: String = Input::with_theme(&theme)
+        .with_prompt(format!(
+            "{} {}",
+            style("Start filename in").bold(),
+            style(format!("[{}]", dir_name)).bold().cyan()
+        ))
+        .interact_text()
+        .context("failed to read start filename")?;
+    let end: String = Input::with_theme(&theme)
+        .with_prompt(format!("{}", style("End filename").bold()))
+        .interact_text()
+        .context("failed to read end filename")?;
+    Ok((start.trim().to_string(), end.trim().to_string()))
+}
+
+// --- batch ---
+
+fn split_stem_ext(filename: &str) -> Result<(&str, &str)> {
+    let dot = filename
+        .rfind('.')
+        .with_context(|| format!("filename '{}' has no extension", filename))?;
+    Ok((&filename[..dot], &filename[dot..]))
+}
+
+fn generate_batch_filenames(start: &str, end: &str) -> Result<Vec<String>> {
+    let (start_stem, ext) = split_stem_ext(start)?;
+    let (end_stem, end_ext) = split_stem_ext(end)?;
+    if ext != end_ext {
+        bail!(
+            "start and end filenames have different extensions ('{}' vs '{}')",
+            ext, end_ext
+        );
+    }
+    if start_stem.len() != end_stem.len() {
+        bail!(
+            "start and end filenames have incompatible zero-padding ('{}' vs '{}')",
+            start_stem, end_stem
+        );
+    }
+    let width = start_stem.len();
+    let start_n: u64 = start_stem
+        .parse()
+        .with_context(|| format!("start filename stem '{}' is not a number", start_stem))?;
+    let end_n: u64 = end_stem
+        .parse()
+        .with_context(|| format!("end filename stem '{}' is not a number", end_stem))?;
+    if start_n > end_n {
+        bail!("start filename must come before end filename");
+    }
+    let filenames = (start_n..=end_n)
+        .map(|n| format!("{:0>width$}{}", n, ext, width = width))
+        .collect();
+    Ok(filenames)
+}
+
+// --- api ---
+
+fn mime_for_ext(filename: &str) -> Option<&'static str> {
+    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        _ => None,
+    }
+}
+
+async fn translate_file(
+    client: &reqwest::Client,
+    api_key: &str,
+    translator: &str,
+    filename: &str,
+) -> Result<String> {
+    let bytes = tokio::fs::read(filename)
+        .await
+        .with_context(|| format!("failed to read file '{}'", filename))?;
+
+    let basename = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .with_context(|| format!("invalid filename: '{}'", filename))?;
+    let mime = mime_for_ext(filename).with_context(|| {
+        let ext = std::path::Path::new(filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("(none)");
+        format!("unsupported file extension: '{}'", ext)
+    })?;
+    let file_part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(basename.to_string())
+        .mime_str(mime)
+        .context("invalid MIME type")?;
+
+    let form = reqwest::multipart::Form::new()
+        .text("target_lang", "en")
+        .text("translator", translator.to_string())
+        .text("font", "wildwords")
+        .text("text_align", "auto")
+        .text("stroke_disabled", "false")
+        .text("min_font_size", "12")
+        .part("file", file_part);
+
+    let response = client
+        .post("https://api.toriitranslate.com/api/v2/upload")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .multipart(form)
+        .send()
+        .await
+        .context("failed to send request")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!("API error {}: {}", status, body);
+    }
+
+    let api_response: ApiResponse = response.json().await.context("failed to parse API response")?;
+
+    let (response_mime, b64_data): (&str, &str) = match api_response.image.split_once(',') {
+        Some((header, data)) => {
+            let mime = header
+                .strip_prefix("data:")
+                .and_then(|s| s.split(';').next())
+                .unwrap_or("image/png");
+            (mime, data)
+        }
+        None => ("image/png", &api_response.image),
+    };
+
+    let response_ext = match response_mime {
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "png",
+    };
+
+    let image_bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64_data)
+        .context("failed to decode base64 image")?;
+
+    let stem = std::path::Path::new(basename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(basename);
+    let out_filename = format!("{}.{}", stem, response_ext);
+    let out_path = format!("./translated-result/{}", out_filename);
+    tokio::fs::write(&out_path, &image_bytes)
+        .await
+        .with_context(|| format!("failed to write output file '{}'", out_path))?;
+
+    Ok(out_filename)
+}
+
+// --- main ---
+
+async fn run() -> Result<()> {
+    print_banner();
+
+    let cfg = ensure_api_key()?;
+
+    // Restore previous selections as defaults
+    let translator_default = TRANSLATORS
+        .iter()
+        .position(|t| t.value == cfg.last_translator)
+        .unwrap_or(0);
+    let mode_default = if cfg.last_mode == "batch" { 1 } else { 0 };
+
+    let translator = prompt_translator(translator_default)?;
+    let mode = prompt_mode(mode_default)?;
+
+    // Persist the new selections immediately so they survive even if the run is interrupted
+    save_config(&Config {
+        api_key: cfg.api_key.clone(),
+        last_translator: translator.to_string(),
+        last_mode: match mode { Mode::Single => "single", Mode::Batch => "batch" }.to_string(),
+    })?;
+
+    let api_key = cfg.api_key;
+
+    let filenames: Vec<String> = match mode {
+        Mode::Single => {
+            let f = prompt_single_file()?;
+            vec![f]
+        }
+        Mode::Batch => {
+            let (start, end) = prompt_batch_range()?;
+            generate_batch_filenames(&start, &end)?
+        }
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    tokio::fs::create_dir_all("./translated-result")
+        .await
+        .context("failed to create output directory")?;
+
+    section("Translating");
+    println!(
+        "  {} {} file{}",
+        style("Processing").bold(),
+        style(filenames.len()).bold().magenta(),
+        if filenames.len() == 1 { "" } else { "s" }
+    );
+    println!();
+
+    // Graceful Ctrl+C — finishes the current image then stops the batch
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = Arc::clone(&stop);
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            stop_clone.store(true, Ordering::SeqCst);
+        }
+    });
+
+    let mut ok_count = 0usize;
+    let mut fail_count = 0usize;
+    let mut stopped_early = false;
+    let mut failed_files: Vec<String> = Vec::new();
+    let batch_start = std::time::Instant::now();
+
+    for filename in &filenames {
+        let pb = make_spinner(filename);
+        let start = std::time::Instant::now();
+        let result = translate_file(&client, &api_key, translator, filename).await;
+        let elapsed = start.elapsed().as_secs_f64();
+        pb.finish_and_clear();
+
+        match result {
+            Ok(out_name) => {
+                println!(
+                    "  {} {} {}  {}",
+                    style("✓").bold().green(),
+                    style("Saved →").green(),
+                    style(format!("translated-result/{}", out_name)).bold().green(),
+                    style(format!("({:.1}s)", elapsed)).dim(),
+                );
+                ok_count += 1;
+            }
+            Err(e) => {
+                println!(
+                    "  {} {}  {}",
+                    style("✗").bold().red(),
+                    style(format!("{}: {}", filename, e)).red(),
+                    style(format!("({:.1}s)", elapsed)).dim(),
+                );
+                failed_files.push(filename.clone());
+                fail_count += 1;
+            }
+        }
+
+        if stop.load(Ordering::SeqCst) {
+            println!();
+            info("Ctrl+C received — stopping.");
+            stopped_early = true;
+            break;
+        }
+    }
+
+    let total_secs = batch_start.elapsed().as_secs();
+    let total_duration = {
+        let h = total_secs / 3600;
+        let m = (total_secs % 3600) / 60;
+        let s = total_secs % 60;
+        if h > 0 {
+            format!("{}h {}m {}s total", h, m, s)
+        } else if m > 0 {
+            format!("{}m {}s total", m, s)
+        } else {
+            format!("{}s total", s)
+        }
+    };
+
+    println!();
+    println!("  {}", style("─".repeat(42)).dim());
+    if stopped_early {
+        println!(
+            "  {} {}/{} completed before stop  {} failed  {}",
+            style("◆").bold().yellow(),
+            style(ok_count + fail_count).bold().yellow(),
+            filenames.len(),
+            style(fail_count).bold().red(),
+            style(format!("({})", total_duration)).dim(),
+        );
+        if !failed_files.is_empty() {
+            println!();
+            println!("  {}", style("Failed files:").bold().red());
+            for f in &failed_files {
+                println!("  {} {}", style("✗").red(), style(f).dim());
+            }
+        }
+        println!();
+        Err(anyhow::anyhow!("batch stopped early by user"))
+    } else if fail_count == 0 {
+        println!(
+            "  {} {} file{} translated successfully  {}",
+            style("✓").bold().green(),
+            style(ok_count).bold().green(),
+            if ok_count == 1 { "" } else { "s" },
+            style(format!("({})", total_duration)).dim(),
+        );
+        println!();
+        Ok(())
+    } else {
+        println!(
+            "  {} {}/{} succeeded  {} failed  {}",
+            style("◆").yellow(),
+            style(ok_count).bold().green(),
+            filenames.len(),
+            style(fail_count).bold().red(),
+            style(format!("({})", total_duration)).dim(),
+        );
+        println!();
+        println!("  {}", style("Failed files:").bold().red());
+        for f in &failed_files {
+            println!("  {} {}", style("✗").red(), style(f).dim());
+        }
+        println!();
+        Err(anyhow::anyhow!("{} file(s) failed to translate", fail_count))
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    if let Err(e) = run().await {
+        err(&format!("{:#}", e));
+        std::process::exit(1);
+    }
 }
