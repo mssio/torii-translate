@@ -14,6 +14,8 @@ use std::time::Duration;
 
 struct Config {
     api_key: String,
+    last_translator: String,  // persisted value of the translator field, e.g. "gemini-2.5-flash"
+    last_mode: String,        // "single" or "batch"
 }
 
 #[derive(Deserialize)]
@@ -70,27 +72,8 @@ fn info(msg: &str) {
     println!("  {} {}", style("›").dim(), style(msg).dim());
 }
 
-fn saved(filename: &str, elapsed: f64) {
-    println!(
-        "  {} {} {}  {}",
-        style("✓").bold().green(),
-        style("Saved →").green(),
-        style(format!("translated-result/{}", filename)).bold().green(),
-        style(format!("({:.1}s)", elapsed)).dim(),
-    );
-}
-
 fn err(msg: &str) {
     println!("  {} {}", style("✗").bold().red(), style(msg).red());
-}
-
-fn err_timed(msg: &str, elapsed: f64) {
-    println!(
-        "  {} {}  {}",
-        style("✗").bold().red(),
-        style(msg).red(),
-        style(format!("({:.1}s)", elapsed)).dim(),
-    );
 }
 
 fn make_spinner(filename: &str) -> ProgressBar {
@@ -110,29 +93,38 @@ fn make_spinner(filename: &str) -> ProgressBar {
 
 fn config_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not determine home directory")?;
-    Ok(home.join(".mss-torii-translate").join("config"))
+    Ok(home.join(".torii-translate").join("config"))
 }
 
 fn load_config() -> Option<Config> {
     let path = config_path().ok()?;
     let content = fs::read_to_string(path).ok()?;
+    let mut api_key = String::new();
+    let mut last_translator = String::new();
+    let mut last_mode = String::new();
     for line in content.lines() {
-        if let Some(("api_key", val)) = line.split_once('=') {
-            let key = val.trim().to_string();
-            if !key.is_empty() {
-                return Some(Config { api_key: key });
+        if let Some((k, v)) = line.split_once('=') {
+            match k.trim() {
+                "api_key"         => api_key         = v.trim().to_string(),
+                "last_translator" => last_translator = v.trim().to_string(),
+                "last_mode"       => last_mode       = v.trim().to_string(),
+                _ => {}
             }
         }
     }
-    None
+    if api_key.is_empty() { return None; }
+    Some(Config { api_key, last_translator, last_mode })
 }
 
-fn save_config(api_key: &str) -> Result<()> {
+fn save_config(cfg: &Config) -> Result<()> {
     let path = config_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).context("failed to create config directory")?;
     }
-    let content = format!("api_key={}\n", api_key);
+    let content = format!(
+        "api_key={}\nlast_translator={}\nlast_mode={}\n",
+        cfg.api_key, cfg.last_translator, cfg.last_mode,
+    );
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -153,10 +145,10 @@ fn save_config(api_key: &str) -> Result<()> {
     Ok(())
 }
 
-fn ensure_api_key() -> Result<String> {
+fn ensure_api_key() -> Result<Config> {
     if let Some(cfg) = load_config() {
-        info("API key loaded from ~/.mss-torii-translate/config");
-        return Ok(cfg.api_key);
+        info("API key loaded from ~/.torii-translate/config");
+        return Ok(cfg);
     }
 
     section("API Key");
@@ -172,27 +164,28 @@ fn ensure_api_key() -> Result<String> {
     if key.is_empty() {
         bail!("API key cannot be empty");
     }
-    save_config(&key)?;
-    success("API key saved to ~/.mss-torii-translate/config");
-    Ok(key)
+    let cfg = Config { api_key: key, last_translator: String::new(), last_mode: String::new() };
+    save_config(&cfg)?;
+    success("API key saved to ~/.torii-translate/config");
+    Ok(cfg)
 }
 
 // --- prompts ---
 
-fn prompt_translator() -> Result<&'static str> {
+fn prompt_translator(default: usize) -> Result<&'static str> {
     section("Translator");
     let labels: Vec<&str> = TRANSLATORS.iter().map(|t| t.label).collect();
     let theme = ColorfulTheme::default();
     let idx = Select::with_theme(&theme)
         .with_prompt(format!("{}", style("Model").bold()))
         .items(&labels)
-        .default(0)
+        .default(default)
         .interact()
         .context("failed to read translator selection")?;
     Ok(TRANSLATORS[idx].value)
 }
 
-fn prompt_mode() -> Result<Mode> {
+fn prompt_mode(default: usize) -> Result<Mode> {
     section("Input");
     let items = [
         format!("{}  Single image", style("❯").magenta()),
@@ -202,7 +195,7 @@ fn prompt_mode() -> Result<Mode> {
     let idx = Select::with_theme(&theme)
         .with_prompt(format!("{}", style("Mode").bold()))
         .items(&items)
-        .default(0)
+        .default(default)
         .interact()
         .context("failed to read mode selection")?;
     Ok(if idx == 0 { Mode::Single } else { Mode::Batch })
@@ -392,9 +385,26 @@ async fn translate_file(
 async fn run() -> Result<()> {
     print_banner();
 
-    let api_key = ensure_api_key()?;
-    let translator = prompt_translator()?;
-    let mode = prompt_mode()?;
+    let cfg = ensure_api_key()?;
+
+    // Restore previous selections as defaults
+    let translator_default = TRANSLATORS
+        .iter()
+        .position(|t| t.value == cfg.last_translator)
+        .unwrap_or(0);
+    let mode_default = if cfg.last_mode == "batch" { 1 } else { 0 };
+
+    let translator = prompt_translator(translator_default)?;
+    let mode = prompt_mode(mode_default)?;
+
+    // Persist the new selections immediately so they survive even if the run is interrupted
+    save_config(&Config {
+        api_key: cfg.api_key.clone(),
+        last_translator: translator.to_string(),
+        last_mode: match mode { Mode::Single => "single", Mode::Batch => "batch" }.to_string(),
+    })?;
+
+    let api_key = cfg.api_key;
 
     let filenames: Vec<String> = match mode {
         Mode::Single => {
@@ -437,60 +447,105 @@ async fn run() -> Result<()> {
     let mut ok_count = 0usize;
     let mut fail_count = 0usize;
     let mut stopped_early = false;
+    let mut failed_files: Vec<String> = Vec::new();
+    let batch_start = std::time::Instant::now();
 
     for filename in &filenames {
-        let start = std::time::Instant::now();
         let pb = make_spinner(filename);
-        match translate_file(&client, &api_key, translator, filename).await {
+        let start = std::time::Instant::now();
+        let result = translate_file(&client, &api_key, translator, filename).await;
+        let elapsed = start.elapsed().as_secs_f64();
+        pb.finish_and_clear();
+
+        match result {
             Ok(out_name) => {
-                pb.finish_and_clear();
-                saved(&out_name, start.elapsed().as_secs_f64());
+                println!(
+                    "  {} {} {}  {}",
+                    style("✓").bold().green(),
+                    style("Saved →").green(),
+                    style(format!("translated-result/{}", out_name)).bold().green(),
+                    style(format!("({:.1}s)", elapsed)).dim(),
+                );
                 ok_count += 1;
             }
             Err(e) => {
-                pb.finish_and_clear();
-                err_timed(&format!("{}: {}", filename, e), start.elapsed().as_secs_f64());
+                println!(
+                    "  {} {}  {}",
+                    style("✗").bold().red(),
+                    style(format!("{}: {}", filename, e)).red(),
+                    style(format!("({:.1}s)", elapsed)).dim(),
+                );
+                failed_files.push(filename.clone());
                 fail_count += 1;
             }
         }
 
         if stop.load(Ordering::SeqCst) {
             println!();
-            info("Ctrl+C received — stopping after current image.");
+            info("Ctrl+C received — stopping.");
             stopped_early = true;
             break;
         }
     }
 
+    let total_secs = batch_start.elapsed().as_secs();
+    let total_duration = {
+        let h = total_secs / 3600;
+        let m = (total_secs % 3600) / 60;
+        let s = total_secs % 60;
+        if h > 0 {
+            format!("{}h {}m {}s total", h, m, s)
+        } else if m > 0 {
+            format!("{}m {}s total", m, s)
+        } else {
+            format!("{}s total", s)
+        }
+    };
+
     println!();
     println!("  {}", style("─".repeat(42)).dim());
     if stopped_early {
         println!(
-            "  {} {}/{} completed before stop  {} failed",
+            "  {} {}/{} completed before stop  {} failed  {}",
             style("◆").bold().yellow(),
             style(ok_count + fail_count).bold().yellow(),
             filenames.len(),
-            style(fail_count).bold().red()
+            style(fail_count).bold().red(),
+            style(format!("({})", total_duration)).dim(),
         );
+        if !failed_files.is_empty() {
+            println!();
+            println!("  {}", style("Failed files:").bold().red());
+            for f in &failed_files {
+                println!("  {} {}", style("✗").red(), style(f).dim());
+            }
+        }
         println!();
         Err(anyhow::anyhow!("batch stopped early by user"))
     } else if fail_count == 0 {
         println!(
-            "  {} {} file{} translated successfully",
+            "  {} {} file{} translated successfully  {}",
             style("✓").bold().green(),
             style(ok_count).bold().green(),
-            if ok_count == 1 { "" } else { "s" }
+            if ok_count == 1 { "" } else { "s" },
+            style(format!("({})", total_duration)).dim(),
         );
         println!();
         Ok(())
     } else {
         println!(
-            "  {} {}/{} succeeded  {} failed",
+            "  {} {}/{} succeeded  {} failed  {}",
             style("◆").yellow(),
             style(ok_count).bold().green(),
             filenames.len(),
-            style(fail_count).bold().red()
+            style(fail_count).bold().red(),
+            style(format!("({})", total_duration)).dim(),
         );
+        println!();
+        println!("  {}", style("Failed files:").bold().red());
+        for f in &failed_files {
+            println!("  {} {}", style("✗").red(), style(f).dim());
+        }
         println!();
         Err(anyhow::anyhow!("{} file(s) failed to translate", fail_count))
     }

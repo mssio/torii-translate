@@ -69,17 +69,25 @@ The app will guide you through four steps:
 
 ### Step 1 — API Key
 
-On first run you will be prompted for your Torii Translate API key. The key is saved to `~/.mss-torii-translate/config` and will not be asked again on subsequent runs.
+On first run you will be prompted for your Torii Translate API key. The key is saved to `~/.torii-translate/config` and will not be asked again on subsequent runs.
 
 ```text
   API Key
   › No API key found. Enter your Torii Translate key to continue.
 
   API key: ••••••••••••••••••••
-  ✓ API key saved to ~/.mss-torii-translate/config
+  ✓ API key saved to ~/.torii-translate/config
 ```
 
-To change the key, edit or delete `~/.mss-torii-translate/config`.
+To change the key, edit `~/.torii-translate/config` directly:
+
+```ini
+api_key=your-key-here
+last_translator=gemini-2.5-flash
+last_mode=single
+```
+
+The `last_translator` and `last_mode` values are written automatically after each run and pre-select your previous choices the next time you start the app.
 
 ### Step 2 — Translator Model
 
@@ -131,6 +139,8 @@ Use the arrow keys to select a translation model, then press Enter.
 
 This calls the API for `001.png`, `002.png`, `003.png`, `004.png`, and `005.png`.
 
+Images are translated **one at a time**, in order. Each file shows an animated spinner with a live elapsed timer while it uploads. Press **Ctrl+C** at any time to stop cleanly after the current file finishes.
+
 ### Output
 
 Translated images are written to `./translated-result/` inside the directory you ran the command from, keeping the original filenames.
@@ -154,7 +164,7 @@ sequenceDiagram
     participant API as Torii API
 
     User->>CLI: Run torii-translate
-    CLI->>FileSystem: Check ~/.mss-torii-translate/config
+    CLI->>FileSystem: Check ~/.torii-translate/config
     alt Config exists
         FileSystem-->>CLI: Load API key
     else Config missing
@@ -176,16 +186,46 @@ sequenceDiagram
     end
 
     CLI->>FileSystem: Read image file(s)
-    loop For each image
-        FileSystem-->>CLI: Image content
-        CLI->>API: Upload (multipart form + bearer auth)
-        API-->>CLI: JSON response (image, inpainted)
-        CLI->>CLI: Decode base64
-        CLI->>FileSystem: Write to ./translated-result/
+    loop For each image (one at a time)
+            FileSystem-->>CLI: Image content
+            CLI->>API: Upload (multipart form + bearer auth)
+            API-->>CLI: JSON response (image, inpainted)
+            CLI->>CLI: Decode base64
+            CLI->>FileSystem: Write to ./translated-result/
     end
 
     CLI->>User: Display success/failure summary
 ```
+
+## API Reference
+
+Full API documentation: **https://toriitranslate.com/api**
+
+This tool uses the **Translate** endpoint:
+
+| Field | Value |
+|---|---|
+| Endpoint | `POST https://api.toriitranslate.com/api/v2/upload` |
+| Auth | `Authorization: Bearer <api-key>` |
+| Credits | 1+ per request (varies by model) |
+
+**Request parameters:**
+
+| Parameter | Required | Description |
+|---|---|---|
+| `file` | Yes | Image file (PNG, JPG, WEBP, GIF) |
+| `target_lang` | Yes | Target language (e.g. `en`) |
+| `translator` | Yes | Model to use (see translator table above) |
+| `font` | Yes | Font name (e.g. `wildwords`) |
+| `text_align` | No | Text alignment (`auto`, `left`, `center`, `right`) |
+| `stroke_disabled` | No | Disable text stroke (`true`/`false`) |
+| `min_font_size` | No | Minimum font size in px |
+| `custom_prompt` | No | Custom translation instructions (max 500 chars) |
+| `context` | No | Additional context for the translation (max 10,000 chars) |
+
+**Response:** JSON with `image` (translated, base64 data URI) and `inpainted` (background-only, base64 data URI).
+
+The API also offers an **OCR endpoint** (`POST /api/ocr`, 1 credit) and an **Inpaint endpoint** (`POST /api/inpaint`, 0.02 credits) — see the full docs for details.
 
 ## Supported Image Formats
 
